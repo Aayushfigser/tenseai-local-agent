@@ -1,0 +1,17 @@
+{
+  "name": "tenseai-local-agent",
+  "version": "1.0.0",
+  "description": "Local RPA agent for TenseAI – runs plans on your own desktop",
+  "bin": {
+    "tenseai-agent": "index.js"
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^1.8.0",
+    "puppeteer": "^21.3.8",
+    "express": "^4.18.2",
+    "dotenv": "^16.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
