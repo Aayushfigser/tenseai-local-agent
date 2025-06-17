@@ -1,5 +1,4 @@
-# utils/geminiAPI.py
-
+#!/usr/bin/env python3
 import requests
 import json
 import sys
@@ -14,36 +13,31 @@ def call_gemini_api(content):
     )
     payload = {
         "contents": [
-            {
-                "parts": [
-                    { "text": content }
-                ]
-            }
+            { "parts": [{ "text": content }] }
         ]
     }
     headers = { "Content-Type": "application/json" }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload)
-        if resp.status_code == 200:
-            return resp.json()
-        else:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        data = resp.json()
+        if resp.status_code != 200:
             return {
+                "candidates": [],
                 "error": f"HTTP {resp.status_code}",
-                "details": resp.json()
+                "details": data
             }
-    except requests.RequestException as e:
-        return { "error": str(e) }
+        return data
+    except Exception as e:
+        return { "candidates": [], "error": str(e) }
 
 def main():
-    # Read the entire prompt from stdin
-    content = sys.stdin.read()
-
-    # Call the Gemini API
-    result = call_gemini_api(content)
-
-    # Emit JSON to stdout
-    print(json.dumps(result))
+    content = sys.stdin.read() or ""
+    result  = call_gemini_api(content)
+    # Ensure at least empty candidates list
+    if "candidates" not in result:
+        result["candidates"] = []
+    sys.stdout.write(json.dumps(result, ensure_ascii=False))
 
 if __name__ == "__main__":
     main()

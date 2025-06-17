@@ -1,9 +1,32 @@
 // File: services/cfllm.js
 const { spawn } = require('child_process');
+const fs         = require('fs');
+const path       = require('path');
+const os         = require('os');
 
 /**
- * Spawn a child process and pipe `inputData` into its stdin.
- * Resolves with the full stdout string, or rejects with stderr.
+ * Extracts a file that was baked into the pkg snapshot under /utils/
+ * into the OS temp folder, so Python can import and run it.
+ *
+ * @param {string} relativeSrcPath  e.g. 'utils/geminiAPI.py'
+ * @returns {string} full path to the extracted temp file
+ */
+function extractToTemp(relativeSrcPath) {
+  // inside packaged exe, __dirname is the snapshot folder.
+  const embeddedPath = path.join(__dirname, '..', relativeSrcPath);
+  const contents     = fs.readFileSync(embeddedPath, 'utf-8');
+
+  const tmpFile = path.join(
+    os.tmpdir(),
+    `tenseai-${path.basename(relativeSrcPath)}`
+  );
+  fs.writeFileSync(tmpFile, contents, 'utf-8');
+  return tmpFile;
+}
+
+/**
+ * Spawns a child process, pipes `inputData` into its stdin, and
+ * resolves with stdout or rejects with stderr.
  */
 function spawnWithInput(cmd, args, inputData) {
   return new Promise((resolve, reject) => {
@@ -11,19 +34,15 @@ function spawnWithInput(cmd, args, inputData) {
       return reject(new TypeError('Input must be a non-empty string'));
     }
 
-    const proc = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
+    const proc = spawn(cmd, args, { stdio: ['pipe','pipe','pipe'] });
+    let stdout = '', stderr = '';
 
-    proc.stdout.on('data', chunk => { stdout += chunk.toString(); });
-    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.stdout.on('data', c => (stdout += c.toString()));
+    proc.stderr.on('data', c => (stderr += c.toString()));
 
     proc.on('close', code => {
-      if (code === 0) {
-        resolve(stdout);
-      } else {
-        reject(new Error(stderr || `Process exited with code ${code}`));
-      }
+      if (code === 0) resolve(stdout);
+      else           reject(new Error(stderr || `Exit code ${code}`));
     });
 
     proc.stdin.write(inputData);
@@ -32,59 +51,31 @@ function spawnWithInput(cmd, args, inputData) {
 }
 
 /**
- * Call your Python Gemini wrapper, piping the prompt into stdin.
- * @param {string} scriptPath – relative path to the Python script
- * @param {string} input       – piped into stdin
- * @returns {Promise<any>}     – parsed JSON response
+ * Calls a Python script under utils/ via a temporary copy, parses JSON output.
+ * On error, logs and returns a benign empty‐text shape.
  */
-async function callPythonJSON(scriptPath, input) {
-  const raw = await spawnWithInput(
-    'python',
-    [scriptPath],
-    input
-  );
+async function callPythonJSON(utilsRelativePath, input) {
   try {
+    const scriptPath = extractToTemp(utilsRelativePath);
+    const raw        = await spawnWithInput('python', [scriptPath], input);
     return JSON.parse(raw);
-  } catch (e) {
-    throw new Error(`Invalid JSON from ${scriptPath}: ${e.message}`);
+  } catch (err) {
+    console.error('⚠️ Python Error:', err.message);
+    // return empty structure so generate() always returns `{ text: '' }`
+    return { candidates: [{ content: { parts: [{ text: '' }] } }] };
   }
 }
 
 /**
- * generate()
- * @param {{ prompt: string, max_tokens?: number, temperature?: number }} opts
- * @returns {Promise<{ text: string }>}
+ * generate({ prompt, max_tokens, temperature })
+ * — invokes your Gemini wrapper and returns `{ text }`
  */
 async function generate({ prompt, max_tokens, temperature }) {
-  const llmResponse = await callPythonJSON(
-    'utils/geminiAPI.py',
-    prompt
-  );
-
+  const llmResponse = await callPythonJSON('utils/geminiAPI.py', prompt);
   const text = llmResponse
     ?.candidates?.[0]?.content?.parts?.[0]?.text
     || '';
-
   return { text };
 }
 
-/**
- * embed()
- * @param {string} input  – the text to embed
- * @returns {Promise<number[]>} – the embedding vector
- */
-async function embed(input) {
-  const embedResponse = await callPythonJSON(
-    'utils/geminiEmbed.py',
-    input
-  );
-  if (!Array.isArray(embedResponse.embedding)) {
-    throw new Error('Expected { embedding: number[] }');
-  }
-  return embedResponse.embedding;
-}
-
-module.exports = {
-  generate,
-  embed
-};
+module.exports = { generate };
