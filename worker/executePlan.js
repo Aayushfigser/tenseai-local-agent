@@ -4,6 +4,43 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs   = require('fs');
 
+
+// ─── HELPERS (add just below your imports) ────────────────────────────────────
+
+// Cache repeated parses
+const parseCache = new Map();
+
+// Sanitize common JSON mistakes
+function sanitizeArgRaw(argRaw) {
+  let s = argRaw
+    .replace(/,\s*]$/,  ']')
+    .replace(/,\s*}$/,  '}');
+  // escape any unescaped quotes inside quoted strings
+  s = s.replace(
+    /"((?:[^"\\]|\\.)*)"/g,
+    (_, inner) => `"${inner.replace(/([^\\])"/g, '$1\\"')}"`
+  );
+  return s.trim();
+}
+
+// Parse special literal types (e.g. RegExp)
+function parseSpecial(raw) {
+  if (/^\/.*\/[gimsuy]*$/.test(raw)) {
+    const parts = raw.match(/^\/(.+)\/([gimsuy]*)$/);
+    return new RegExp(parts[1], parts[2]);
+  }
+  return null;
+}
+
+// Safe wrapper so one bad command doesn’t abort the whole plan
+async function safeParseAndRun(cmd, logs) {
+  try {
+    await parseAndRun(cmd, logs);
+  } catch (err) {
+    logs.push(`⚠️ Failed to run \`${cmd}\`: ${err.message}`);
+  }
+}
+
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 // Nut.js delays
@@ -178,11 +215,19 @@ async function pauseVideo() { await mediaControl('pause'); }
 async function closeVideo() { await pressKey('ControlLeft+W'); }
 
 async function takeScreenshot(savePath) {
-  const img  = await screen.grabScreen();
+  // 1) Grab the screen (PNGJS object)
+  const img = await screen.grabScreen();
+
+  // 2) Determine a file path next to the EXE
   const full = path.isAbsolute(savePath)
     ? savePath
     : path.join(process.cwd(), savePath);
-  fs.writeFileSync(full, img.toPNG());
+
+  // 3) Write the raw PNG buffer—no Jimp needed
+  //    img.data is a Buffer of PNG bytes
+  fs.writeFileSync(full, img.data);
+
+  return `Screenshot saved to ${full}`;
 }
 
 async function adjustVolume(direction = 'up', amount = 1) {
@@ -196,56 +241,92 @@ async function adjustVolume(direction = 'up', amount = 1) {
 
 // ─── PARSER & EXECUTOR ─────────────────────────────────────────────────────────
 
+// ─── PARSER & EXECUTOR (replace your existing one) ─────────────────────────
+
 async function parseAndRun(cmd, logs) {
-  // Guard against non-string commands
   if (typeof cmd !== 'string') {
     logs.push(`✖ Skipping invalid command: ${JSON.stringify(cmd)}`);
     return;
   }
-
   logs.push(`▶ ${cmd}`);
-  let m;
-  try {
-    if      (m = cmd.match(/^runAppByName\("(.+)"\)$/i))        await runAppByName(m[1]);
-    else if (m = cmd.match(/^launchApp\("(.+)"\)$/i))           await launchApp(m[1]);
-    else if (m = cmd.match(/^openUrl\("(.+)"\)$/i))             await openUrlNative(m[1]);
-    else if (m = cmd.match(/^openFolder\("(.+)"\)$/i))          await openFolder(m[1]);
-    else if (m = cmd.match(/^focusWindow\("(.+)"\)$/i))         await focusWindow(m[1]);
-    else if (m = cmd.match(/^typeText\("([^"]+)"\)$/i))         await typeText(m[1]);
-    else if (m = cmd.match(/^pressKey\("([^"]+)"\)$/i))         await pressKey(m[1]);
-    else if (m = cmd.match(/^moveTo\(\s*(\d+),\s*(\d+)\s*\)$/i)) await moveTo(+m[1], +m[2]);
-    else if (m = cmd.match(/^clickAt\(\s*(\d+),\s*(\d+)\s*\)$/i)) await clickAt(+m[1], +m[2]);
-    else if (m = cmd.match(/^wait\((\d+)\)$/i))                  await wait(+m[1]);
-    else if (m = cmd.match(/^scroll\((-?\d+),\s*(-?\d+)\)$/i))   await scroll(+m[1], +m[2]);
-    else if (cmd === 'copyClipboard()')                         await copyClipboard();
-    else if (cmd === 'pasteClipboard()')                        await pasteClipboard();
-    else if (cmd === 'minimizeWindow()')                        await minimizeWindow();
-    else if (cmd === 'switchApp()')                             await switchApp();
-    else if (cmd === 'lockWorkstation()')                       await lockWorkstation();
-    else if (m = cmd.match(/^openFile\("(.+)"\)$/i))            await openFile(m[1]);
-    else if (m = cmd.match(/^mediaControl\("(.+)"\)$/i))        await mediaControl(m[1]);
-    else if (cmd === 'playVideo()')                             await playVideo();
-    else if (cmd === 'pauseVideo()')                            await pauseVideo();
-    else if (cmd === 'closeVideo()')                            await closeVideo();
-    else if (m = cmd.match(/^takeScreenshot\("(.+)"\)$/i))      await takeScreenshot(m[1]);
-    else if (m = cmd.match(/^adjustVolume\("([^"]+)"(?:,\s*(\d+))?\)$/i))
-                                                                  await adjustVolume(m[1], +(m[2] || 1));
-    else throw new Error(`Unknown command: ${cmd}`);
 
-    logs.push(`✔ ${cmd}`);
-  } catch (err) {
-    logs.push(`✖ ${cmd} — ${err.message}`);
-    throw err;
+  // 1) Extract command name and raw argument text
+  const m = cmd.match(/^(\w+)\s*\(([\s\S]*)\)$/);
+  if (!m) throw new Error(`Invalid command format: ${cmd}`);
+  const name   = m[1];
+  let   argRaw = m[2].trim();
+
+  // 2) Try JSON.parse, with sanitize & fallback
+  let args;
+  if (parseCache.has(cmd)) {
+    args = parseCache.get(cmd);
+  } else {
+    try {
+      args = JSON.parse(`[${argRaw}]`);
+    } catch {
+      try {
+        const cleaned = sanitizeArgRaw(argRaw);
+        args = JSON.parse(`[${cleaned}]`);
+      } catch {
+        // final fallback: split on commas outside quotes
+        const parts = argRaw.match(/("(?:\\.|[^"\\])*"|[^,]+)/g) || [];
+        args = parts.map(p => {
+          p = p.trim();
+          if (/^".*"$/.test(p)) {
+            return p.slice(1, -1).replace(/\\"/g, '"');
+          }
+          if (/^\d+$/.test(p)) return Number(p);
+          const special = parseSpecial(p);
+          return special !== null ? special : p;
+        });
+      }
+    }
+    parseCache.set(cmd, args);
   }
+
+  // 3) Dispatch
+  switch (name) {
+    case 'runAppByName':    await runAppByName(args[0]); break;
+    case 'launchApp':       await launchApp(args[0]); break;
+    case 'openUrl':         await openUrlNative(args[0]); break;
+    case 'openFolder':      await openFolder(args[0]); break;
+    case 'focusWindow':     await focusWindow(args[0]); break;
+    case 'typeText':        await typeText(args[0]); break;
+    case 'pressKey':        await pressKey(args[0]); break;
+    case 'moveTo':          await moveTo(args[0], args[1]); break;
+    case 'clickAt':         await clickAt(args[0], args[1]); break;
+    case 'wait':            await wait(args[0]); break;
+    case 'scroll':          await scroll(args[0], args[1]); break;
+    case 'copyClipboard':   await copyClipboard(); break;
+    case 'pasteClipboard':  await pasteClipboard(); break;
+    case 'minimizeWindow':  await minimizeWindow(); break;
+    case 'switchApp':       await switchApp(); break;
+    case 'lockWorkstation': await lockWorkstation(); break;
+    case 'openFile':        await openFile(args[0]); break;
+    case 'mediaControl':    await mediaControl(args[0]); break;
+    case 'playVideo':       await playVideo(); break;
+    case 'pauseVideo':      await pauseVideo(); break;
+    case 'closeVideo':      await closeVideo(); break;
+    case 'takeScreenshot':  await takeScreenshot(args[0]); break;
+    case 'adjustVolume':    await adjustVolume(args[0], args[1] || 1); break;
+    default:
+      throw new Error(`Unknown command: ${name}()`);
+  }
+
+  logs.push(`✔ ${cmd}`);
 }
 
+// ─── EXPORT (replace existing export) ────────────────────────────────────────
 exports.executePlan = async function(planArray) {
   if (!Array.isArray(planArray)) {
     throw new Error('Plan must be an array of DSL commands.');
   }
   const logs = [];
   for (const cmd of planArray) {
-    await parseAndRun(cmd, logs);
+    await safeParseAndRun(cmd, logs);
   }
   return logs;
 };
+
+
+

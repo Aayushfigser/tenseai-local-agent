@@ -1,0 +1,7 @@
+;!@Install@!UTF-8!
+Title="TenseAI Local Agent"
+BeginPrompt="This will install & run your Local Agent. Click OK to continue."
+RunProgram="dist\tenseai-agent-1.0.0-win.exe"
+GUIFlags="2"          ; 2 = show progress window
+ExecuteFile="dist\tenseai-agent-1.0.0-win.exe"
+;!@InstallEnd@!

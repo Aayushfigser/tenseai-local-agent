@@ -8,11 +8,15 @@
   "scripts": {
     "build:win": "powershell -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "build:mac": "bash scripts/build-mac.sh",
+    "package:mac":  "npm run build:mac && bash scripts/package-mac.sh",
+    "package:mac-full": "npm run build:mac && bash scripts/package-mac-full.sh",
     "build:linux": "bash scripts/build-linux.sh",
-    "build": "npm run build:win && npm run build:mac && npm run build:linux"
+    "build": "npm run build:win && npm run build:mac && npm run build:linux",
+    "package:win": "npm run build:win && powershell -ExecutionPolicy Bypass -File scripts/package-win-full.ps1"
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
+    "axios": "^1.10.0",
     "cors": "^2.8.5",
     "dotenv": "^16.0.0",
     "express": "^4.18.2"
@@ -20,21 +24,28 @@
   "devDependencies": {
     "pkg": "^5.8.1"
   },
-  "optionalDependencies": {
-    "create-dmg": "^3.2.0"
-  },
   "engines": {
     "node": ">=16.0.0"
   },
   "pkg": {
     "scripts": [
+      "index.js",
+      "services/**/*.js",
       "worker/**/*.js"
     ],
     "assets": [
-      "utils/**/*.py",
+      ".env",
+      "services/**/*.js",
+      "worker/**/*.js",
+      "node_modules/axios/dist/node/axios.cjs",
       "node_modules/@nut-tree-fork/nut-js/**/*",
       "node_modules/@nut-tree-fork/libnut/**/*",
       "node_modules/dotenv/**/*"
-    ]
+    ],
+    "targets": [
+      "node16-win-x64"
+    ],
+    "outputPath": "dist",
+    "no-bytecode": true
   }
 }
